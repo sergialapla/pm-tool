@@ -3,7 +3,6 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import {
   DashboardOutlined,
   ProjectOutlined,
-  TeamOutlined,
   ReconciliationOutlined,
   SettingOutlined
 } from '@ant-design/icons'
@@ -13,7 +12,6 @@ const { Sider, Content } = Layout
 const menuItems = [
   { key: '/overview', icon: <DashboardOutlined />, label: 'Overview' },
   { key: '/projects', icon: <ProjectOutlined />, label: 'Projects' },
-  { key: '/teams', icon: <TeamOutlined />, label: 'Teams' },
   { key: '/resources', icon: <ReconciliationOutlined />, label: 'Resources' },
   { key: '/config', icon: <SettingOutlined />, label: 'Config' }
 ]

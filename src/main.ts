@@ -13,12 +13,15 @@ function createWindow(): void {
     show: false,
     autoHideMenuBar: true,
     webPreferences: {
-      preload: join(__dirname, '../preload/preload.js'),
+      preload: join(__dirname, 'preload.js'),
       sandbox: false
     }
   })
 
-  mainWindow.on('ready-to-show', () => mainWindow.show())
+  mainWindow.on('ready-to-show', () => {
+    mainWindow.show()
+    mainWindow.webContents.openDevTools()
+  })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
