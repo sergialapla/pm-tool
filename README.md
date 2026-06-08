@@ -4,7 +4,11 @@ Desktop app for managing projects, teams, and resources. Built with Electron, Re
 
 ## Download
 
-Clone the repository:
+### Option 1: Install the app directly (recommended for end users)
+
+Download the latest Windows installer from the [Releases page](https://github.com/sergialapla/pm-tool/releases/latest), run `PM Tool Setup.exe`, and you're ready to go — no other setup required.
+
+### Option 2: Clone and build from source (for development)
 
 ```bash
 git clone <repository-url>
