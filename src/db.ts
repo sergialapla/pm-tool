@@ -1,19 +1,58 @@
-import Database from 'better-sqlite3'
+import initSqlJs from 'sql.js'
+import type { Database } from 'sql.js'
+import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 
-let db: Database.Database
+type BindParam = string | number | null | Uint8Array
+type Params = BindParam[] | Record<string, BindParam>
 
-export function getDb(): Database.Database {
-  return db
+let db: Database
+let currentDbPath: string
+
+function normalizeParams(params: Params): BindParam[] | Record<string, BindParam> {
+  if (Array.isArray(params)) return params
+  const out: Record<string, BindParam> = {}
+  for (const [k, v] of Object.entries(params)) {
+    const key = k.startsWith('@') || k.startsWith(':') || k.startsWith('$') ? k : `@${k}`
+    out[key] = v as BindParam
+  }
+  return out
 }
 
-export function initDb(customPath?: string): void {
-  const dbPath = customPath || join(app.getPath('userData'), 'pm-tool.db')
-  db = new Database(dbPath)
-  db.pragma('journal_mode = WAL')
-  db.pragma('foreign_keys = ON')
-  runMigrations()
+export function dbAll<T = Record<string, unknown>>(sql: string, params?: Params): T[] {
+  const stmt = db.prepare(sql)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (params !== undefined) stmt.bind(normalizeParams(params) as any)
+  const rows: T[] = []
+  while (stmt.step()) rows.push(stmt.getAsObject() as unknown as T)
+  stmt.free()
+  return rows
+}
+
+export function dbGet<T = Record<string, unknown>>(sql: string, params?: Params): T | null {
+  const stmt = db.prepare(sql)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (params !== undefined) stmt.bind(normalizeParams(params) as any)
+  const row = stmt.step() ? (stmt.getAsObject() as unknown as T) : null
+  stmt.free()
+  return row
+}
+
+export function dbRun(sql: string, params?: Params): { lastInsertRowid: number } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db.run(sql, params !== undefined ? (normalizeParams(params) as any) : undefined)
+  const result = db.exec('SELECT last_insert_rowid()')[0]
+  return { lastInsertRowid: Number(result.values[0][0]) }
+}
+
+export function dbExec(sql: string): void {
+  db.exec(sql)
+}
+
+export function saveDb(): void {
+  const data = db.export()
+  writeFileSync(currentDbPath, Buffer.from(data))
 }
 
 const EXT_SCHEMA = `
@@ -40,7 +79,7 @@ const EXT_SCHEMA = `
 `
 
 function runMigrations(): void {
-  db.exec(`
+  dbExec(`
     CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -140,10 +179,12 @@ function runMigrations(): void {
   `)
 
   // Migrate external_resources: recreate if 'draft' status not supported
-  const extDef = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='external_resources'").get() as { sql: string } | null)?.sql || ''
+  const extDef = dbGet<{ sql: string }>(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='external_resources'"
+  )?.sql ?? ''
   if (!extDef.includes("'draft'")) {
-    db.pragma('foreign_keys = OFF')
-    db.exec(`
+    db.run('PRAGMA foreign_keys = OFF')
+    dbExec(`
       ALTER TABLE external_resources RENAME TO _ext_bak;
       CREATE TABLE external_resources (${EXT_SCHEMA});
       INSERT INTO external_resources
@@ -156,50 +197,28 @@ function runMigrations(): void {
       FROM _ext_bak;
       DROP TABLE _ext_bak;
     `)
-    db.pragma('foreign_keys = ON')
+    db.run('PRAGMA foreign_keys = ON')
   }
 
-  // Migrate external_people: add year
-  const extPeopleCols = (db.prepare('PRAGMA table_info(external_people)').all() as { name: string }[]).map(c => c.name)
-  if (!extPeopleCols.includes('year')) {
-    db.exec(`ALTER TABLE external_people ADD COLUMN year INTEGER NOT NULL DEFAULT ${new Date().getFullYear()}`)
+  // Column-presence migrations
+  const addColIfMissing = (table: string, col: string, def: string) => {
+    const cols = dbAll<{ name: string }>(`PRAGMA table_info(${table})`).map(c => c.name)
+    if (!cols.includes(col)) dbExec(`ALTER TABLE ${table} ADD COLUMN ${def}`)
   }
 
-  // Migrate internal_people: add year
-  const intPeopleCols = (db.prepare('PRAGMA table_info(internal_people)').all() as { name: string }[]).map(c => c.name)
-  if (!intPeopleCols.includes('year')) {
-    db.exec(`ALTER TABLE internal_people ADD COLUMN year INTEGER NOT NULL DEFAULT ${new Date().getFullYear()}`)
-  }
-
-  // Migrate teams: add year
-  const teamCols = (db.prepare('PRAGMA table_info(teams)').all() as { name: string }[]).map(c => c.name)
-  if (!teamCols.includes('year')) {
-    db.exec(`ALTER TABLE teams ADD COLUMN year INTEGER NOT NULL DEFAULT ${new Date().getFullYear()}`)
-  }
-
-  // Migrate internal_resources: add team_id
-  const intCols = (db.prepare('PRAGMA table_info(internal_resources)').all() as { name: string }[]).map(c => c.name)
-  if (!intCols.includes('team_id')) {
-    db.exec(`ALTER TABLE internal_resources ADD COLUMN team_id INTEGER REFERENCES teams(id)`)
-  }
-
-  // Migrate other_resources: add status
-  const othCols = (db.prepare('PRAGMA table_info(other_resources)').all() as { name: string }[]).map(c => c.name)
-  if (!othCols.includes('status')) {
-    db.exec(`ALTER TABLE other_resources ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'`)
-  }
-
-  // Migrate internal_people: add total_hours
-  const peopleCols = (db.prepare('PRAGMA table_info(internal_people)').all() as { name: string }[]).map(c => c.name)
-  if (!peopleCols.includes('total_hours')) {
-    db.exec(`ALTER TABLE internal_people ADD COLUMN total_hours REAL NOT NULL DEFAULT 0`)
-  }
+  const yr = String(new Date().getFullYear())
+  addColIfMissing('external_people', 'year', `year INTEGER NOT NULL DEFAULT ${yr}`)
+  addColIfMissing('internal_people', 'year', `year INTEGER NOT NULL DEFAULT ${yr}`)
+  addColIfMissing('teams', 'year', `year INTEGER NOT NULL DEFAULT ${yr}`)
+  addColIfMissing('internal_resources', 'team_id', 'team_id INTEGER REFERENCES teams(id)')
+  addColIfMissing('other_resources', 'status', "status TEXT NOT NULL DEFAULT 'draft'")
+  addColIfMissing('internal_people', 'total_hours', 'total_hours REAL NOT NULL DEFAULT 0')
 
   // Migrate legacy internal_resources → internal_people + internal_allocations
-  const peopleCount = (db.prepare('SELECT COUNT(*) as c FROM internal_people').get() as { c: number }).c
-  const legacyCount = (db.prepare('SELECT COUNT(*) as c FROM internal_resources').get() as { c: number }).c
+  const peopleCount = (dbGet<{ c: number }>('SELECT COUNT(*) as c FROM internal_people') as { c: number }).c
+  const legacyCount = (dbGet<{ c: number }>('SELECT COUNT(*) as c FROM internal_resources') as { c: number }).c
   if (peopleCount === 0 && legacyCount > 0) {
-    db.exec(`
+    dbExec(`
       INSERT INTO internal_people (name, price_per_hour)
         SELECT DISTINCT name, price_per_hour FROM internal_resources;
       INSERT INTO internal_allocations (person_id, project_id, team_id, dedication_pct, monthly_hours, monthly_actual)
@@ -211,10 +230,10 @@ function runMigrations(): void {
   }
 
   // Migrate external_resources → external_people + external_pos
-  const extPeopleCount = (db.prepare('SELECT COUNT(*) as c FROM external_people').get() as { c: number }).c
-  const extResCount = (db.prepare('SELECT COUNT(*) as c FROM external_resources').get() as { c: number }).c
+  const extPeopleCount = (dbGet<{ c: number }>('SELECT COUNT(*) as c FROM external_people') as { c: number }).c
+  const extResCount = (dbGet<{ c: number }>('SELECT COUNT(*) as c FROM external_resources') as { c: number }).c
   if (extPeopleCount === 0 && extResCount > 0) {
-    db.exec(`
+    dbExec(`
       INSERT INTO external_people (name, company_id, position, country, rate_type, rate, allocation)
         SELECT name, company_id, position, country, rate_type, rate, allocation
         FROM (
@@ -233,7 +252,21 @@ function runMigrations(): void {
     `)
   }
 
-  db.prepare(`INSERT OR IGNORE INTO settings(key,value) VALUES('active_year',?)`).run(
-    String(new Date().getFullYear())
-  )
+  dbRun(`INSERT OR IGNORE INTO settings(key,value) VALUES(@key,@value)`, {
+    key: 'active_year',
+    value: yr,
+  })
+}
+
+export async function initDb(customPath?: string): Promise<void> {
+  const SQL = await initSqlJs()
+  currentDbPath = customPath ?? join(app.getPath('userData'), 'pm-tool.db')
+
+  db = existsSync(currentDbPath)
+    ? new SQL.Database(readFileSync(currentDbPath))
+    : new SQL.Database()
+
+  db.run('PRAGMA foreign_keys = ON')
+  runMigrations()
+  saveDb()
 }
