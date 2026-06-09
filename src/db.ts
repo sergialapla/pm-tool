@@ -1,8 +1,8 @@
 import initSqlJs from 'sql.js'
 import type { Database } from 'sql.js'
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import { app } from 'electron'
+import { homedir } from 'os'
 
 type BindParam = string | number | null | Uint8Array
 type Params = BindParam[] | Record<string, BindParam>
@@ -260,7 +260,21 @@ function runMigrations(): void {
 
 export async function initDb(customPath?: string): Promise<void> {
   const SQL = await initSqlJs()
-  currentDbPath = customPath ?? join(app.getPath('userData'), 'pm-tool.db')
+  if (!customPath) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((process.versions as any).electron) {
+      // Running inside Electron — use userData path
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { app } = require('electron') as typeof import('electron')
+      customPath = join(app.getPath('userData'), 'pm-tool.db')
+    } else {
+      // Running as a plain Node server
+      const dir = join(homedir(), '.pm-tool')
+      mkdirSync(dir, { recursive: true })
+      customPath = join(dir, 'pm-tool.db')
+    }
+  }
+  currentDbPath = customPath
 
   db = existsSync(currentDbPath)
     ? new SQL.Database(readFileSync(currentDbPath))
