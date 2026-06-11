@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Typography, Progress, Row, Col, Card, Statistic, Tag } from 'antd'
+import { Typography, Progress, Row, Col, Card, Statistic, Tag, Select } from 'antd'
 import { api } from '../utils/api'
 import { fmt, sumArr, calcPOExpected, calcPOForecast, calcPOPrevision, calcAllocationExpected } from '../utils/format'
 import type { Project, Team, ExternalPerson, ExternalPO, InternalPerson, InternalAllocation, OtherResource } from '../types'
@@ -15,6 +15,8 @@ export default function Overview(): JSX.Element {
   const [allocations, setAllocations] = useState<InternalAllocation[]>([])
   const [others, setOthers]           = useState<OtherResource[]>([])
   const [year, setYear]               = useState<number>(new Date().getFullYear())
+  const [teamFilter, setTeamFilter]     = useState<number | null>(null)
+  const [projectFilter, setProjectFilter] = useState<number | null>(null)
 
   useEffect(() => {
     Promise.all([
@@ -84,15 +86,33 @@ export default function Overview(): JSX.Element {
     }
   }
 
-  const filteredProjects = projects.filter(p => p.year === year)
+  const yearProjects     = projects.filter(p => p.year === year)
+  const teamFiltered     = teamFilter === null ? yearProjects : yearProjects.filter(p => p.team_id === teamFilter)
+  const filteredProjects = projectFilter === null ? teamFiltered : teamFiltered.filter(p => p.id === projectFilter)
+  const yearTeams        = teams.filter(t => t.year === year)
+  const filteredTeams    = teamFilter === null ? yearTeams : yearTeams.filter(t => t.id === teamFilter)
 
   const teamStats = (t: Team) => {
-    const tProjects = filteredProjects.filter(p => p.team_id === t.id)
+    const tProjects    = filteredProjects.filter(p => p.team_id === t.id)
+    const tProjectIds  = new Set(tProjects.map(p => p.id))
     const covered = tProjects.reduce((s, p) => s + (p.external_budget || 0) + (p.internal_budget || 0) + (p.additional_budget || 0), 0)
-    const needed  = allocations
-      .filter(a => tProjects.some(p => p.id === a.project_id))
+
+    // Only count resources explicitly assigned to this team (team_id match), within the team's projects
+    const intNeeded = allocations
+      .filter(a => tProjectIds.has(a.project_id as number) && a.team_id === t.id)
       .reduce((s, a) => s + sumArr(calcAllocationExpected(a, pph(a.person_id))), 0)
-    return { covered, needed, gap: covered - needed, projectCount: tProjects.length, tProjects }
+    const extNeeded = extPos
+      .filter(po => tProjectIds.has(po.project_id as number) && po.team_id === t.id)
+      .reduce((s, po) => {
+        const person = extPeople.find(p => p.id === po.person_id)
+        return person ? s + sumArr(calcPOForecast(person, po)) : s
+      }, 0)
+    const othNeeded = others
+      .filter(r => tProjectIds.has(r.project_id) && r.team_id === t.id)
+      .reduce((s, r) => s + sumArr(r.monthly_expected || []), 0)
+
+    const needed = intNeeded + extNeeded + othNeeded
+    return { covered, needed, gap: covered - needed, projectCount: tProjects.length, tProjects, intNeeded, extNeeded, othNeeded }
   }
 
   // Global summary
@@ -100,13 +120,32 @@ export default function Overview(): JSX.Element {
   const allFc = filteredProjects.reduce((s, p) => s + projectBreakdown(p).totalForecast, 0)
   const allPrevision = filteredProjects.reduce((s, p) => s + projectBreakdown(p).totalPrevision, 0)
   const expectedGap = allBd - allPrevision
-  const consumedColor = (pct: number) => pct > 100 ? '#ff4d4f' : pct > 80 ? '#faad14' : '#52c41a'
+  const consumedColor = (pct: number) => pct > 105 ? '#ff4d4f' : pct > 100 ? '#faad14' : '#52c41a'
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>Overview</Title>
         <Tag color="blue" style={{ fontSize: 13, padding: '2px 10px' }}>{year}</Tag>
+        <Select
+          allowClear
+          placeholder="All teams"
+          style={{ width: 200 }}
+          value={teamFilter}
+          onChange={v => { setTeamFilter(v ?? null); setProjectFilter(null) }}
+          options={yearTeams.map(t => ({ value: t.id, label: t.name }))}
+        />
+        <Select
+          allowClear
+          showSearch
+          placeholder="All projects"
+          style={{ width: 220 }}
+          value={projectFilter}
+          onChange={v => setProjectFilter(v ?? null)}
+          filterOption={(input, opt) => String(opt?.label ?? '').toLowerCase().includes(input.toLowerCase())}
+          options={(teamFilter === null ? yearProjects : yearProjects.filter(p => p.team_id === teamFilter))
+            .map(p => ({ value: p.id, label: `${p.project_number} – ${p.name}` }))}
+        />
       </div>
 
       {/* Summary strip */}
@@ -135,7 +174,6 @@ export default function Overview(): JSX.Element {
       <Row gutter={[16, 16]} style={{ marginBottom: 32 }}>
         {filteredProjects.map(p => {
           const bd = projectBreakdown(p)
-          const color = consumedColor(bd.consumed)
           const tn = teamName(p.team_id)
           return (
             <Col xs={24} lg={12} xl={8} key={p.id}>
@@ -150,71 +188,73 @@ export default function Overview(): JSX.Element {
                   </div>
                 }
               >
-                {/* Breakdown table */}
-                <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr style={{ color: '#888' }}>
-                      <th style={{ textAlign: 'left', fontWeight: 500, paddingBottom: 4, width: '22%' }}></th>
-                      <th style={{ textAlign: 'right', fontWeight: 500, paddingBottom: 4 }}>Budget</th>
-                      <th style={{ textAlign: 'right', fontWeight: 500, paddingBottom: 4 }}>Forecast</th>
-                      <th style={{ textAlign: 'right', fontWeight: 500, paddingBottom: 4, color: '#1677ff' }}>Prevision</th>
-                      <th style={{ textAlign: 'right', fontWeight: 500, paddingBottom: 4 }}>Actual</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {bd.rows.map(row => (
-                      <tr key={row.label} style={{ borderTop: '1px solid #f5f5f5' }}>
-                        <td style={{ padding: '3px 0', color: '#666' }}>{row.label}</td>
-                        <td style={{ textAlign: 'right', padding: '3px 0' }}>{fmt(row.budget)}</td>
-                        <td style={{ textAlign: 'right', padding: '3px 0' }}>{fmt(row.forecast)}</td>
-                        <td style={{ textAlign: 'right', padding: '3px 0', color: '#1677ff' }}>{fmt(row.prevision)}</td>
-                        <td style={{ textAlign: 'right', padding: '3px 0' }}>{fmt(row.actual)}</td>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+                  {/* Breakdown table */}
+                  <table style={{ flex: 1, minWidth: 0, width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ color: '#888' }}>
+                        <th style={{ textAlign: 'left', fontWeight: 500, paddingBottom: 3, width: '22%' }}></th>
+                        <th style={{ textAlign: 'right', fontWeight: 500, paddingBottom: 3 }}>Budget</th>
+                        <th style={{ textAlign: 'right', fontWeight: 500, paddingBottom: 3 }}>Forecast</th>
+                        <th style={{ textAlign: 'right', fontWeight: 500, paddingBottom: 3, color: '#1677ff' }}>Prevision</th>
+                        <th style={{ textAlign: 'right', fontWeight: 500, paddingBottom: 3 }}>Actual</th>
                       </tr>
-                    ))}
-                    <tr style={{ borderTop: '2px solid #e8e8e8', fontWeight: 600 }}>
-                      <td style={{ padding: '4px 0' }}>Total</td>
-                      <td style={{ textAlign: 'right', padding: '4px 0' }}>{fmt(bd.totalBudget)}</td>
-                      <td style={{ textAlign: 'right', padding: '4px 0' }}>{fmt(bd.totalForecast)}</td>
-                      <td style={{ textAlign: 'right', padding: '4px 0', color: '#1677ff' }}>{fmt(bd.totalPrevision)}</td>
-                      <td style={{ textAlign: 'right', padding: '4px 0' }}>{fmt(bd.totalActual)}</td>
-                    </tr>
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {bd.rows.map(row => (
+                        <tr key={row.label} style={{ borderTop: '1px solid #f5f5f5' }}>
+                          <td style={{ padding: '2px 0', color: '#666' }}>{row.label}</td>
+                          <td style={{ textAlign: 'right', padding: '2px 0' }}>{fmt(row.budget)}</td>
+                          <td style={{ textAlign: 'right', padding: '2px 0' }}>{fmt(row.forecast)}</td>
+                          <td style={{ textAlign: 'right', padding: '2px 0', color: '#1677ff' }}>{fmt(row.prevision)}</td>
+                          <td style={{ textAlign: 'right', padding: '2px 0' }}>{fmt(row.actual)}</td>
+                        </tr>
+                      ))}
+                      <tr style={{ borderTop: '2px solid #e8e8e8', fontWeight: 600 }}>
+                        <td style={{ padding: '3px 0' }}>Total</td>
+                        <td style={{ textAlign: 'right', padding: '3px 0' }}>{fmt(bd.totalBudget)}</td>
+                        <td style={{ textAlign: 'right', padding: '3px 0' }}>{fmt(bd.totalForecast)}</td>
+                        <td style={{ textAlign: 'right', padding: '3px 0', color: '#1677ff' }}>{fmt(bd.totalPrevision)}</td>
+                        <td style={{ textAlign: 'right', padding: '3px 0' }}>{fmt(bd.totalActual)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
 
-                {/* Pie charts */}
-                {(() => {
-                  const prevPct   = bd.totalBudget > 0 ? (bd.totalPrevision / bd.totalBudget) * 100 : 0
-                  const actualPct = bd.totalBudget > 0 ? (bd.totalActual    / bd.totalBudget) * 100 : 0
-                  const prevColor   = consumedColor(prevPct)
-                  const actualColor = consumedColor(actualPct)
-                  const items = [
-                    { label: 'Forecast',  pct: bd.consumed, c: color,       gap: bd.gap },
-                    { label: 'Prevision', pct: prevPct,     c: prevColor,   gap: bd.totalBudget - bd.totalPrevision },
-                    { label: 'Actual',    pct: actualPct,   c: actualColor, gap: bd.totalBudget - bd.totalActual },
-                  ]
-                  return (
-                    <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-around' }}>
-                      {items.map(({ label, pct, c, gap }) => (
-                        <div key={label} style={{ textAlign: 'center' }}>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: '#555', marginBottom: 4 }}>{label}</div>
-                          <Progress
-                            type="circle"
-                            percent={Math.min(pct, 100)}
-                            size={120}
-                            strokeWidth={15}
-                            strokeColor={c}
-                            format={() => (
-                              <span style={{ fontSize: 13, fontWeight: 700, color: c }}>{pct.toFixed(1)}%</span>
-                            )}
-                          />
-                          <div style={{ marginTop: 6, fontSize: 13, fontWeight: 700, color: gap < 0 ? '#ff4d4f' : '#52c41a' }}>
-                            {fmt(gap)}
+                  {/* Segmented bar: fill = Prevision, arrow marker = Actual */}
+                  {(() => {
+                    const prevPct   = bd.totalBudget > 0 ? (bd.totalPrevision / bd.totalBudget) * 100 : 0
+                    const actualPct = bd.totalBudget > 0 ? (bd.totalActual    / bd.totalBudget) * 100 : 0
+                    const prevColor   = consumedColor(prevPct)
+                    const actualColor = consumedColor(actualPct)
+                    const gap = bd.totalBudget - bd.totalPrevision
+                    const segments  = 10
+                    const filled    = Math.min(segments, Math.round(Math.min(prevPct, 100) / 100 * segments))
+                    const barHeight = 110
+                    const markerPos = Math.min(Math.max(actualPct, 0), 100)
+                    return (
+                      <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', width: 100, marginRight: 24 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: '#fff', background: prevColor, padding: '2px 10px', borderRadius: 4, marginBottom: 6 }}>
+                          {prevPct.toFixed(0)}%
+                        </div>
+                        <div style={{ position: 'relative', width: 36, height: barHeight }}>
+                          <div style={{ display: 'flex', flexDirection: 'column-reverse', gap: 2, height: '100%' }}>
+                            {Array.from({ length: segments }).map((_, i) => (
+                              <div key={i} style={{ flex: 1, borderRadius: 1, background: i < filled ? prevColor : '#e8e8e8' }} />
+                            ))}
+                          </div>
+                          {/* Actual marker */}
+                          <div style={{ position: 'absolute', left: '100%', bottom: `calc(${markerPos}% - 7px)`, display: 'flex', alignItems: 'center', whiteSpace: 'nowrap', marginLeft: 4 }}>
+                            <span style={{ fontSize: 14, color: actualColor, lineHeight: 1 }}>◄</span>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: actualColor, marginLeft: 2 }}>{actualPct.toFixed(0)}%</span>
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  )
-                })()}
+                        <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, color: gap < 0 ? '#ff4d4f' : '#52c41a' }}>
+                          {fmt(gap)}
+                        </div>
+                      </div>
+                    )
+                  })()}
+                </div>
               </Card>
             </Col>
           )
@@ -227,7 +267,7 @@ export default function Overview(): JSX.Element {
       {/* Teams */}
       <Title level={5} style={{ marginBottom: 12 }}>Teams</Title>
       <Row gutter={[16, 16]}>
-        {teams.filter(t => t.year === year).map(t => {
+        {filteredTeams.map(t => {
           const s = teamStats(t)
           const gapColor = s.gap < 0 ? '#ff4d4f' : '#52c41a'
           const intAllocs = allocations.filter(a => a.team_id === t.id)
@@ -278,7 +318,19 @@ export default function Overview(): JSX.Element {
                 <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                   <tbody>
                     <tr style={{ borderTop: '1px solid #f5f5f5' }}>
-                      <td style={{ padding: '3px 0', color: '#666' }}>Budget Needed</td>
+                      <td style={{ padding: '3px 0', color: '#888' }}>· External</td>
+                      <td style={{ textAlign: 'right', color: '#888' }}>{fmt(s.extNeeded)}</td>
+                    </tr>
+                    <tr style={{ borderTop: '1px solid #f5f5f5' }}>
+                      <td style={{ padding: '3px 0', color: '#888' }}>· Internal</td>
+                      <td style={{ textAlign: 'right', color: '#888' }}>{fmt(s.intNeeded)}</td>
+                    </tr>
+                    <tr style={{ borderTop: '1px solid #f5f5f5' }}>
+                      <td style={{ padding: '3px 0', color: '#888' }}>· Others</td>
+                      <td style={{ textAlign: 'right', color: '#888' }}>{fmt(s.othNeeded)}</td>
+                    </tr>
+                    <tr style={{ borderTop: '2px solid #e8e8e8' }}>
+                      <td style={{ padding: '4px 0', fontWeight: 600 }}>Budget Needed</td>
                       <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmt(s.needed)}</td>
                     </tr>
                     <tr style={{ borderTop: '1px solid #f5f5f5' }}>
@@ -306,7 +358,7 @@ export default function Overview(): JSX.Element {
             </Col>
           )
         })}
-        {teams.filter(t => t.year === year).length === 0 && (
+        {filteredTeams.length === 0 && (
           <Col span={24}><Text type="secondary">No teams for {year}.</Text></Col>
         )}
       </Row>

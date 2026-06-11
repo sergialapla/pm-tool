@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Tabs, Table, Button, Drawer, Form, Input, InputNumber,
   Select, Space, Popconfirm, Typography, Tag, Divider, Tooltip,
-  Row, Col, Card, Modal, Progress
+  Row, Col, Card, Modal
 } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, CheckOutlined, CloseOutlined, CaretRightOutlined, CaretDownOutlined } from '@ant-design/icons'
 import { api } from '../utils/api'
@@ -136,6 +136,8 @@ export default function Resources(): JSX.Element {
   const [companies, setCompanies] = useState<Company[]>([])
   const [teams, setTeams] = useState<Team[]>([])
   const [year, setYear] = useState<number>(new Date().getFullYear())
+  const [teamFilter, setTeamFilter]       = useState<number | null>(null)
+  const [projectFilter, setProjectFilter] = useState<number | null>(null)
 
   useEffect(() => {
     Promise.all([api.projects.list(), api.companies.list(), api.teams.list(), api.settings.get()])
@@ -146,13 +148,33 @@ export default function Resources(): JSX.Element {
   }, [])
 
   const filteredProjects = projects.filter(p => p.year === year)
-  const sharedProps = { projects: filteredProjects, companies, teams, year }
+  const yearTeams = teams.filter(t => t.year === year)
+  const teamFilteredProjects = teamFilter === null ? filteredProjects : filteredProjects.filter(p => p.team_id === teamFilter)
+  const sharedProps = { projects: filteredProjects, companies, teams, year, teamFilter, projectFilter }
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>Resources</Title>
         <Tag color="blue" style={{ fontSize: 13, padding: '2px 10px' }}>{year}</Tag>
+        <Select
+          allowClear
+          placeholder="All teams"
+          style={{ width: 180 }}
+          value={teamFilter}
+          onChange={v => { setTeamFilter(v ?? null); setProjectFilter(null) }}
+          options={yearTeams.map(t => ({ value: t.id, label: t.name }))}
+        />
+        <Select
+          allowClear
+          showSearch
+          placeholder="All projects"
+          style={{ width: 220 }}
+          value={projectFilter}
+          onChange={v => setProjectFilter(v ?? null)}
+          filterOption={(input, opt) => String(opt?.label ?? '').toLowerCase().includes(input.toLowerCase())}
+          options={teamFilteredProjects.map(p => ({ value: p.id, label: `${p.project_number} – ${p.name}` }))}
+        />
       </div>
       <Tabs items={[
         { key: 'external', label: 'External', children: <ExternalTab {...sharedProps} /> },
@@ -167,7 +189,7 @@ export default function Resources(): JSX.Element {
 // External Resources Tab  (people → POs model, card layout)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ExternalTab({ projects, companies, teams, year }: { projects: Project[]; companies: Company[]; teams: Team[]; year: number }) {
+function ExternalTab({ projects, companies, teams, year, teamFilter, projectFilter }: { projects: Project[]; companies: Company[]; teams: Team[]; year: number; teamFilter: number | null; projectFilter: number | null }) {
   const [people, setPeople] = useState<ExternalPerson[]>([])
   const [pos, setPos]       = useState<ExternalPO[]>([])
 
@@ -231,7 +253,21 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
   useEffect(() => { load() }, [])
 
   const projectIds = new Set(projects.map(p => p.id))
-  const personPOs = (personId: number) => pos.filter(po => po.person_id === personId && (po.project_id === null || projectIds.has(po.project_id)))
+  const personPOs = (personId: number) => pos.filter(po =>
+    po.person_id === personId &&
+    (po.project_id === null || projectIds.has(po.project_id)) &&
+    (teamFilter === null || po.team_id === teamFilter) &&
+    (projectFilter === null || po.project_id === projectFilter)
+  )
+  const visibleExtPeople = people.filter(p => {
+    if (p.year !== year) return false
+    if (teamFilter === null && projectFilter === null) return true
+    return pos.some(po =>
+      po.person_id === p.id &&
+      (teamFilter === null || po.team_id === teamFilter) &&
+      (projectFilter === null || po.project_id === projectFilter)
+    )
+  })
   const companyName = (id: number | null) => companies.find(c => c.id === id)?.name || ''
   const projectName = (id: number | null) => id ? (projects.find(p => p.id === id)?.project_number + ' ' + projects.find(p => p.id === id)?.name || '—') : '—'
   const teamName    = (id: number | null) => id ? (teams.find(t => t.id === id)?.name || '—') : '—'
@@ -420,6 +456,8 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
       setInlinePOFixedExp(Array.from({ length: 12 }, (_, i) =>
         (i + 1 >= (po.month_start || 1) && i + 1 <= (po.month_end || 12)) ? Math.round((po.total_po || 0) / n * 100) / 100 : 0
       ))
+    } else if (person?.rate_type === 'month') {
+      setInlinePOFixedExp([...(po.monthly_expected || ZERO12())])
     } else {
       setInlinePOFixedExp(ZERO12())
     }
@@ -446,7 +484,7 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
       monthly_hours: inlinePOVals.monthly_hours,
       monthly_expected: inlinePOFixedExp,
     }) : ZERO12()
-    const exp = person?.rate_type === 'fixed' ? inlinePOFixedExp : liveExp
+    const exp = (person?.rate_type === 'fixed' || person?.rate_type === 'month') ? inlinePOFixedExp : liveExp
     await api.extPos.upsert({
       id: poId,
       person_id: inlinePOPersonId!,
@@ -484,7 +522,7 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
       </div>
 
       <Row gutter={[16, 16]}>
-        {people.filter(p => p.year === year).map(person => {
+        {visibleExtPeople.map(person => {
           const isEditing = inlinePersonId === person.id
           const pPOs = personPOs(person.id!)
           const totalExp  = pPOs.reduce((s, po) => s + sumArr(calcPOForecast(person, po)), 0)
@@ -510,7 +548,11 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
                         onPressEnter={() => confirmPersonEdit(person.id!)}
                       />
                     ) : (
-                      <Text strong style={{ fontSize: 14 }}>{person.name}</Text>
+                      <Text strong style={{ fontSize: 14 }}>
+                        {person.name}
+                        {person.position && <Text type="secondary" style={{ fontSize: 14, fontWeight: 400 }}> - {person.position}</Text>}
+                        {person.company_id && <Text type="secondary" style={{ fontSize: 14, fontWeight: 400 }}> - {companyName(person.company_id)}</Text>}
+                      </Text>
                     )}
                     <Space size={4}>
                       {isEditing ? (
@@ -532,29 +574,26 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
                   </div>
                 }
               >
-                {/* Person fields */}
-                <div style={{ display: 'flex', gap: 12, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <div>
-                    <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Company</div>
-                    {isEditing ? (
-                      <Select
-                        size="small" value={inlinePersonVals.company_id}
-                        options={compOpts} style={{ width: 150 }} allowClear
-                        onChange={v => setInlinePersonVals(prev => ({ ...prev, company_id: v ?? null }))}
-                      />
-                    ) : (
-                      person.company_id ? <Tag>{companyName(person.company_id)}</Tag> : <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
-                    )}
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Position</div>
-                    {isEditing ? (
-                      <Input size="small" value={inlinePersonVals.position} style={{ width: 130 }}
-                        onChange={e => setInlinePersonVals(v => ({ ...v, position: e.target.value }))} />
-                    ) : (
-                      <Text style={{ fontSize: 13 }}>{person.position || '—'}</Text>
-                    )}
-                  </div>
+                {/* Person fields + bar */}
+                <div style={{ display: 'flex', gap: 16, marginBottom: 16, alignItems: 'center' }}>
+                <div style={{ flex: '0 0 calc(60% - 8px)', minWidth: 0, display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {isEditing && (
+                    <>
+                      <div>
+                        <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Company</div>
+                        <Select
+                          size="small" value={inlinePersonVals.company_id}
+                          options={compOpts} style={{ width: 150 }} allowClear
+                          onChange={v => setInlinePersonVals(prev => ({ ...prev, company_id: v ?? null }))}
+                        />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Position</div>
+                        <Input size="small" value={inlinePersonVals.position} style={{ width: 130 }}
+                          onChange={e => setInlinePersonVals(v => ({ ...v, position: e.target.value }))} />
+                      </div>
+                    </>
+                  )}
                   <div>
                     <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Country</div>
                     {isEditing ? (
@@ -604,34 +643,34 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
                       <Tag color="blue" style={{ fontSize: 12 }}>{person.year}</Tag>
                     )}
                   </div>
-                </div>
-
-                {/* Stats */}
-                <div style={{ display: 'flex', gap: 20, marginBottom: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
                   <div>
                     <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Total Expected</div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: '#1677ff' }}>{fmt(totalExp)}</div>
+                    <Text style={{ fontSize: 13, fontWeight: 700, color: '#1677ff' }}>{fmt(totalExp)}</Text>
                   </div>
-                  <div>
-                    <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Total Prevision</div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: '#722ed1' }}>{fmt(totalPrev)}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Total Actual</div>
-                    <div style={{ fontSize: 15, fontWeight: 700 }}>{fmt(totalAct)}</div>
-                  </div>
-                  {totalExp > 0 && (
-                    <div style={{ flex: 1, minWidth: 140 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#722ed1', marginBottom: 1 }}>
-                        <span>Prevision</span><span>{prevPct.toFixed(0)}%</span>
+                </div>
+                  {totalExp > 0 && (() => {
+                    const prevColor   = prevPct > 105 ? '#ff4d4f' : prevPct > 100 ? '#faad14' : '#722ed1'
+                    const segments    = 10
+                    const filledAct   = Math.min(segments, Math.round(Math.min(actPct, 100) / 100 * segments))
+                    const filledPrev  = Math.min(segments, Math.round(Math.min(prevPct, 100) / 100 * segments))
+                    const markerPos   = Math.min(Math.max(actPct, 0), 100)
+                    return (
+                      <div style={{ flex: '0 0 calc(40% - 8px)', minWidth: 0, position: 'relative', marginBottom: 16 }}>
+                        <div style={{ textAlign: 'right', fontSize: 11, fontWeight: 600, color: prevColor, marginBottom: 2 }}>
+                          Prevision {prevPct.toFixed(0)}% · {fmt(totalPrev)}
+                        </div>
+                        <div style={{ display: 'flex', gap: 2, height: 14 }}>
+                          {Array.from({ length: segments }).map((_, i) => (
+                            <div key={i} style={{ flex: 1, borderRadius: 1, background: i < filledAct ? '#52c41a' : i < filledPrev ? prevColor : '#e8e8e8' }} />
+                          ))}
+                        </div>
+                        <div style={{ position: 'absolute', top: '100%', left: `${markerPos}%`, transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 2 }}>
+                          <span style={{ fontSize: 12, lineHeight: 1, color: '#52c41a' }}>▲</span>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: '#52c41a', whiteSpace: 'nowrap' }}>{fmt(totalAct)}</span>
+                        </div>
                       </div>
-                      <Progress percent={Math.min(prevPct, 100)} size="small" strokeColor="#722ed1" showInfo={false} />
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#1677ff', marginBottom: 1, marginTop: 4 }}>
-                        <span>Actual</span><span>{actPct.toFixed(0)}%</span>
-                      </div>
-                      <Progress percent={Math.min(actPct, 100)} size="small" strokeColor="#1677ff" showInfo={false} />
-                    </div>
-                  )}
+                    )
+                  })()}
                 </div>
 
                 {/* POs header */}
@@ -650,7 +689,7 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
                       const inlinePerson = people.find(p => p.id === inlinePOPersonId)
 
                       if (isEditingPO && inlinePerson) {
-                        const liveExp = inlinePerson.rate_type === 'fixed'
+                        const liveExp = (inlinePerson.rate_type === 'fixed' || inlinePerson.rate_type === 'month')
                           ? inlinePOFixedExp
                           : calcPOExpected(inlinePerson, {
                               month_start: inlinePOVals.month_start,
@@ -707,12 +746,11 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
                               )}
                               <InputNumber
                                 value={inlinePOVals.total_po} min={0} size="small" style={{ width: 110 }}
-                                disabled={inlinePerson.rate_type === 'month'}
                                 placeholder="Total PO"
                                 onChange={v => {
                                   if (skipInlinePoChange.current) { skipInlinePoChange.current = false; return }
                                   const newPo = v ?? 0
-                                  if (inlinePerson.rate_type === 'fixed') {
+                                  if (inlinePerson.rate_type === 'fixed' || inlinePerson.rate_type === 'month') {
                                     const n = Math.max(1, inlinePOVals.month_end - inlinePOVals.month_start + 1)
                                     setInlinePOFixedExp(Array.from({ length: 12 }, (_, i) =>
                                       (i + 1 >= inlinePOVals.month_start && i + 1 <= inlinePOVals.month_end)
@@ -821,8 +859,8 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
             </Col>
           )
         })}
-        {people.length === 0 && (
-          <Col span={24}><Text type="secondary">No external people yet — click "Add Person" to get started.</Text></Col>
+        {visibleExtPeople.length === 0 && (
+          <Col span={24}><Text type="secondary">{teamFilter ? 'No people for this team.' : 'No external people yet — click "Add Person" to get started.'}</Text></Col>
         )}
       </Row>
 
@@ -937,7 +975,7 @@ function ExternalTab({ projects, companies, teams, year }: { projects: Project[]
 // Internal Resources Tab  (people → allocations model, card layout)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function InternalTab({ projects, teams, year }: { projects: Project[]; companies: Company[]; teams: Team[]; year: number }) {
+function InternalTab({ projects, teams, year, teamFilter, projectFilter }: { projects: Project[]; companies: Company[]; teams: Team[]; year: number; teamFilter: number | null; projectFilter: number | null }) {
   const [people, setPeople]           = useState<InternalPerson[]>([])
   const [allocations, setAllocations] = useState<InternalAllocation[]>([])
 
@@ -983,7 +1021,21 @@ function InternalTab({ projects, teams, year }: { projects: Project[]; companies
   useEffect(() => { load() }, [])
 
   const projectIds = new Set(projects.map(p => p.id))
-  const personAllocs = (personId: number) => allocations.filter(a => a.person_id === personId && (a.project_id === null || projectIds.has(a.project_id)))
+  const personAllocs = (personId: number) => allocations.filter(a =>
+    a.person_id === personId &&
+    (a.project_id === null || projectIds.has(a.project_id)) &&
+    (teamFilter === null || a.team_id === teamFilter) &&
+    (projectFilter === null || a.project_id === projectFilter)
+  )
+  const visibleIntPeople = people.filter(p => {
+    if (p.year !== year) return false
+    if (teamFilter === null && projectFilter === null) return true
+    return allocations.some(a =>
+      a.person_id === p.id &&
+      (teamFilter === null || a.team_id === teamFilter) &&
+      (projectFilter === null || a.project_id === projectFilter)
+    )
+  })
   const personAllocatedHours = (personId: number) =>
     personAllocs(personId).reduce((s, a) => s + sumArr(a.monthly_hours || []), 0)
 
@@ -1083,7 +1135,7 @@ function InternalTab({ projects, teams, year }: { projects: Project[]; companies
       </div>
 
       <Row gutter={[16, 16]}>
-        {people.filter(p => p.year === year).map(person => {
+        {visibleIntPeople.map(person => {
           const isEditing = inlineEditId === person.id
           const allocs = personAllocs(person.id!)
           const allocatedH = personAllocatedHours(person.id!)
@@ -1135,7 +1187,8 @@ function InternalTab({ projects, teams, year }: { projects: Project[]; companies
                 }
               >
                 {/* Stats row */}
-                <div style={{ display: 'flex', gap: 20, marginBottom: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                <div style={{ display: 'flex', gap: 16, marginBottom: 16, alignItems: 'center' }}>
+                <div style={{ flex: '0 0 calc(60% - 8px)', minWidth: 0, display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'center' }}>
                   <div>
                     <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Price / Hour</div>
                     {isEditing ? (
@@ -1184,22 +1237,32 @@ function InternalTab({ projects, teams, year }: { projects: Project[]; companies
                     <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Total Expected</div>
                     <div style={{ fontSize: 15, fontWeight: 700, color: '#1677ff' }}>{fmt(totalExp)}</div>
                   </div>
-                  <div>
-                    <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>Total Prevision</div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: '#722ed1' }}>{fmt(totalPrev)}</div>
-                  </div>
-                  {totalExp > 0 && (
-                    <div style={{ flex: 1, minWidth: 160 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#722ed1', marginBottom: 1 }}>
-                        <span>Prevision</span><span>{(totalPrev / totalExp * 100).toFixed(0)}%</span>
+                </div>
+                  {totalExp > 0 && (() => {
+                    const actPct     = totalActual / totalExp * 100
+                    const prevPct    = totalPrev / totalExp * 100
+                    const prevColor  = prevPct > 105 ? '#ff4d4f' : prevPct > 100 ? '#faad14' : '#722ed1'
+                    const segments   = 10
+                    const filledAct  = Math.min(segments, Math.round(Math.min(actPct, 100) / 100 * segments))
+                    const filledPrev = Math.min(segments, Math.round(Math.min(prevPct, 100) / 100 * segments))
+                    const markerPos  = Math.min(Math.max(actPct, 0), 100)
+                    return (
+                      <div style={{ flex: '0 0 calc(40% - 8px)', minWidth: 0, position: 'relative', marginBottom: 16 }}>
+                        <div style={{ textAlign: 'right', fontSize: 11, fontWeight: 600, color: prevColor, marginBottom: 2 }}>
+                          Prevision {prevPct.toFixed(0)}% · {fmt(totalPrev)}
+                        </div>
+                        <div style={{ display: 'flex', gap: 2, height: 14 }}>
+                          {Array.from({ length: segments }).map((_, i) => (
+                            <div key={i} style={{ flex: 1, borderRadius: 1, background: i < filledAct ? '#52c41a' : i < filledPrev ? prevColor : '#e8e8e8' }} />
+                          ))}
+                        </div>
+                        <div style={{ position: 'absolute', top: '100%', left: `${markerPos}%`, transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 2 }}>
+                          <span style={{ fontSize: 12, lineHeight: 1, color: '#52c41a' }}>▲</span>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: '#52c41a', whiteSpace: 'nowrap' }}>{fmt(totalActual)}</span>
+                        </div>
                       </div>
-                      <Progress percent={Math.min(totalPrev / totalExp * 100, 100)} size="small" strokeColor="#722ed1" showInfo={false} style={{ marginBottom: 4 }} />
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#1677ff', marginBottom: 1 }}>
-                        <span>Actual</span><span>{(totalActual / totalExp * 100).toFixed(0)}%</span>
-                      </div>
-                      <Progress percent={Math.min(totalActual / totalExp * 100, 100)} size="small" strokeColor="#1677ff" showInfo={false} />
-                    </div>
-                  )}
+                    )
+                  })()}
                 </div>
 
                 {/* Allocations header */}
@@ -1334,8 +1397,8 @@ function InternalTab({ projects, teams, year }: { projects: Project[]; companies
             </Col>
           )
         })}
-        {people.length === 0 && (
-          <Col span={24}><Text type="secondary">No people yet — click "Add Person" to get started.</Text></Col>
+        {visibleIntPeople.length === 0 && (
+          <Col span={24}><Text type="secondary">{teamFilter ? 'No people for this team.' : 'No people yet — click "Add Person" to get started.'}</Text></Col>
         )}
       </Row>
 
@@ -1406,7 +1469,7 @@ function InternalTab({ projects, teams, year }: { projects: Project[]; companies
 // Others Tab
 // ─────────────────────────────────────────────────────────────────────────────
 
-function OthersTab({ projects, companies, teams, year }: { projects: Project[]; companies: Company[]; teams: Team[]; year: number }) {
+function OthersTab({ projects, companies, teams, year, teamFilter, projectFilter }: { projects: Project[]; companies: Company[]; teams: Team[]; year: number; teamFilter: number | null; projectFilter: number | null }) {
   const [data, setData] = useState<OtherResource[]>([])
   const [filterPid, setFilterPid] = useState<number | null>(null)
   const [open, setOpen] = useState(false)
@@ -1421,7 +1484,10 @@ function OthersTab({ projects, companies, teams, year }: { projects: Project[]; 
 
   const projectIds = new Set(projects.map(p => p.id))
   const yearData = data.filter(r => projectIds.has(r.project_id))
-  const displayed = filterPid ? yearData.filter(r => r.project_id === filterPid) : yearData
+  const displayed = yearData
+    .filter(r => filterPid === null || r.project_id === filterPid)
+    .filter(r => teamFilter === null || r.team_id === teamFilter)
+    .filter(r => projectFilter === null || r.project_id === projectFilter)
   const projectName = (id: number) => projects.find(p => p.id === id)?.name || '—'
   const companyName = (id: number | null) => companies.find(c => c.id === id)?.name || '—'
   const teamName = (id: number | null) => teams.find(t => t.id === id)?.name || '—'
